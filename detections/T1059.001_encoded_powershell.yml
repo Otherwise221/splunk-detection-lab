@@ -1,0 +1,78 @@
+name: PowerShell Launched with Encoded Command
+id: DL-002
+date: 2026-09-26
+author: Lateefat Alimi
+status: tested
+description: >
+  Detects PowerShell sessions started with an encoded command, where the real
+  instructions are hidden in base64 text. Attackers use this to hide what their
+  script does from people reading logs and from simple keyword detections.
+
+mitre_attack:
+  tactic: TA0002 Execution
+  technique_id: T1059.001
+  technique_name: "Command and Scripting Interpreter: PowerShell"
+
+data_source:
+  log: Windows PowerShell
+  event_id: 400 (Engine state changed to Available)
+  fields_used: Message (HostApplication line extracted with rex), Hostname
+
+search: |
+  index=otrf Channel="Windows PowerShell" EventID=400
+  | rex field=Message "HostApplication=(?<HostApplication>[^\r\n]+)"
+  | where match(HostApplication, "(?i)\s[-/]e[a-z]*\s+[A-Za-z0-9+/=]{20,}")
+  | table _time Hostname HostApplication
+
+how_it_works: >
+  Event 400 is written once every time a PowerShell session starts, for any
+  reason, so it is not suspicious by itself. The HostApplication line inside
+  the event shows the exact command used to start PowerShell. It is not a
+  separate field in this data, so rex pulls it out of the Message text. The
+  regex then looks for a flag that starts with -e or /e followed by 20 or more
+  base64 characters. PowerShell accepts any short form of -EncodedCommand
+  (-e, -en, -enc, /enc), so matching the shape instead of the exact word
+  catches the variants. Requiring 20 or more base64 characters keeps
+  -ExecutionPolicy Bypass from matching, since "Bypass" is only 6 characters.
+
+false_positives:
+  - "Seen in testing: none. Event 400 fired once and it was the attack."
+  - "Expected in production: some management and deployment tools (for example configuration management agents or software installers) launch PowerShell with encoded commands to avoid quoting problems. These would be allowlisted by parent process or by the decoded command."
+  - "Expected in production: admin scripts written by staff who use -EncodedCommand out of habit. Worth reviewing, then allowlisting by host or account if approved."
+
+tuning:
+  before: 1 hit
+  after: 1 hit
+  what_changed: >
+    Tuning here was about choosing the right event, not filtering hits. Event
+    800 also contains the encoded command but fired 2,940 times in 3 minutes
+    because it logs every pipeline. Event 400 fires once per session, which
+    gives one alert per malicious launch. The {20,} length rule in the regex
+    was added so -ExecutionPolicy and other flags starting with -e do not
+    match. I tested the regex against -e, -enc and /EncodedCommand with base64
+    (all match) and against -ep Bypass, -ExecutionPolicy RemoteSigned and
+    -NoProfile (none match).
+
+test_results:
+  dataset: OTRF Security-Datasets empire_mimikatz_logonpasswords
+  expected_hits: 1
+  actual_hits: 1
+  notes: >
+    The hit is WORKSTATION5 at 2020-08-07 14:32:46 UTC, launch command
+    "powershell.exe -noP -sta -w 1 -enc SQBGACgA...". Decoded (base64,
+    UTF-16LE), the first line of the payload disables PowerShell script block
+    logging, so the rest of the attack would not be recorded. My first idea was
+    to alert on the process creation event (Sysmon 1 or Security 4688) for
+    powershell.exe with -enc in its command line, but that event is not in the
+    dataset because Empire started before logging began. I checked what data
+    existed before writing the final logic.
+
+limitations:
+  - "Blind if PowerShell logging is disabled, or if the attacker disables it before starting a new session."
+  - "Misses attackers who hide commands another way: download-and-run (IEX with a web request), obfuscation without -enc, or running PowerShell code without powershell.exe."
+  - "Would be stronger paired with a process creation detection (Sysmon 1 or 4688 CommandLine), which also shows the parent process. That data was not available here."
+  - "Matching {20,} base64 characters assumes the payload is long. A very short encoded command would slip past."
+
+references:
+  - https://attack.mitre.org/techniques/T1059/001/
+  - https://github.com/OTRF/Security-Datasets/tree/master/datasets/atomic/windows/credential_access/host

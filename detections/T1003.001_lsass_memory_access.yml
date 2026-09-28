@@ -1,0 +1,76 @@
+name: LSASS Memory Access by Suspicious Process
+id: DL-001
+date: 2026-09-26
+author: Lateefat Alimi
+status: tested
+description: >
+  Detects a process opening lsass.exe with permission to read its memory, or
+  touching lsass.exe from code that is not backed by a file on disk. Attackers
+  do this to steal passwords and hashes stored in LSASS, most often with
+  Mimikatz.
+
+mitre_attack:
+  tactic: TA0006 Credential Access
+  technique_id: T1003.001
+  technique_name: "OS Credential Dumping: LSASS Memory"
+
+data_source:
+  log: Microsoft-Windows-Sysmon/Operational
+  event_id: 10 (ProcessAccess)
+  fields_used: TargetImage, SourceImage, GrantedAccess, CallTrace, Hostname
+
+search: |
+  index=otrf EventID=10 TargetImage="*\\lsass.exe"
+  | eval access=tonumber(replace(GrantedAccess,"0x",""),16)
+  | where floor(access/16)%2=1 OR like(CallTrace,"%UNKNOWN%")
+  | table _time Hostname SourceImage GrantedAccess CallTrace
+
+how_it_works: >
+  Sysmon event 10 logs every time one process opens another. Many normal
+  Windows processes open LSASS, so that alone is not suspicious. This search
+  asks two follow-up questions. First, did the process ask for PROCESS_VM_READ
+  (the 0x10 bit in GrantedAccess), which is the permission needed to read
+  LSASS memory where credentials live? The search converts the hex value to a
+  number and checks that bit, so it catches 0x1010, 0x1410, 0x1FFFFF and other
+  Mimikatz variants, not one exact value. Second, does the CallTrace contain
+  UNKNOWN? That means the request came from code loaded straight into memory
+  with no DLL on disk behind it, which is how Empire runs Mimikatz. Either
+  condition triggers the alert.
+
+false_positives:
+  - "Seen in testing: svchost.exe opening LSASS with 0x1000 and 0x2000 (query and set limited information). These do not include VM_READ and are excluded by the search."
+  - "Expected in production: antivirus and EDR agents (for example MsMpEng.exe) that scan LSASS memory. These would need an allowlist by full SourceImage path."
+  - "Expected in production: legitimate admin or support tools such as Task Manager or ProcDump creating a memory dump for troubleshooting."
+
+tuning:
+  before: 4 hits (any process accessing lsass.exe)
+  after: 1 hit
+  what_changed: >
+    The first version alerted on any access to lsass.exe and returned 4 events,
+    3 of them svchost.exe doing normal work. Filtering on the VM_READ bit and
+    the UNKNOWN caller removed all 3 without losing the attack. I used OR
+    instead of AND so the detection still fires if an attacker uses only one of
+    the two behaviors, for example a dumping tool with a normal CallTrace. The
+    tradeoff is more noise from security tools that read LSASS legitimately.
+
+test_results:
+  dataset: OTRF Security-Datasets empire_mimikatz_logonpasswords
+  expected_hits: 1
+  actual_hits: 1
+  notes: >
+    The hit is powershell.exe on WORKSTATION5 at 2020-08-07 14:32:57 UTC with
+    GrantedAccess 0x1010 and a CallTrace ending in UNKNOWN(000002EE319439BF).
+    Security events 4656 and 4663 from the same process show "Read from
+    process memory" against LSASS, which confirms the finding from a second
+    log source. The bitand() function is not supported in my Splunk version,
+    so the search checks the VM_READ bit with floor(access/16)%2=1 instead.
+
+limitations:
+  - "Blind if Sysmon is not deployed or its config does not log event 10 for lsass.exe. Many organizations skip this because it is high volume."
+  - "Does not catch dumping methods that avoid opening LSASS directly, such as abusing a driver or reading a copy of LSASS memory from a crash dump."
+  - "Does not cover malicious Security Support Providers loaded into LSASS (T1547.005). That needs a separate registry-based detection."
+  - "An attacker running from a signed tool with a normal CallTrace is only caught by the VM_READ condition, which is also where legitimate security tools create noise."
+
+references:
+  - https://attack.mitre.org/techniques/T1003/001/
+  - https://github.com/OTRF/Security-Datasets/tree/master/datasets/atomic/windows/credential_access/host

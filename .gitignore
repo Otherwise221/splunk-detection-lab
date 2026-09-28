@@ -1,0 +1,4 @@
+# Raw datasets are large and publicly available; link to the source instead of committing them
+*.json
+*.zip
+*.tar.gz

@@ -1,0 +1,79 @@
+name: Repeated Outbound Connections on a Steady Timer (C2 Beaconing)
+id: DL-004
+date: 2026-09-27
+author: Lateefat Alimi
+status: tested
+description: >
+  Detects a program making repeated outbound connections to the same
+  destination at a fairly steady interval. This is how malware checks in with
+  its command and control (C2) server to ask for new instructions.
+
+mitre_attack:
+  tactic: TA0011 Command and Control
+  technique_id: T1071.001
+  technique_name: "Application Layer Protocol: Web Protocols"
+
+data_source:
+  log: Microsoft-Windows-Sysmon/Operational
+  event_id: 3 (NetworkConnect)
+  fields_used: Image, Hostname, DestinationIp, DestinationPort, Initiated, _time
+
+search: |
+  index=otrf Channel="Microsoft-Windows-Sysmon/Operational" EventID=3 Initiated=true NOT DestinationIp IN ("0:0:0:0:0:0:0:1","::1","127.0.0.1")
+  | sort 0 _time
+  | streamstats current=f last(_time) as prev_time by Hostname Image DestinationIp DestinationPort
+  | eval gap=_time-prev_time
+  | stats count as connections avg(gap) as avg_gap stdev(gap) as jitter by Hostname Image DestinationIp DestinationPort
+  | eval avg_gap=round(avg_gap,1), jitter=round(jitter,2)
+  | where connections>=3 AND jitter < avg_gap/2
+
+how_it_works: >
+  Sysmon event 3 logs network connections. Initiated=true keeps only
+  connections this machine started, since a beacon always calls out. The
+  search sorts connections by time, and streamstats remembers when the
+  previous connection from the same program to the same destination happened.
+  The gap is the number of seconds in between. stats then works out, for each
+  program and destination, how many connections there were, the average gap,
+  and how much the gap varies (jitter, the standard deviation). The where line
+  keeps anything with at least 3 connections whose jitter is less than half
+  its average gap, meaning it calls out on a fairly steady rhythm.
+
+false_positives:
+  - "Seen in testing: Microsoft.ActiveDirectory.WebServices.exe (ADWS) on MORDORDC connecting to 0:0:0:0:0:0:0:1 on port 389 (LDAP) every 59.7 seconds with jitter of 0.19. That is the domain controller talking to its own LDAP service over loopback. Removed by excluding loopback addresses."
+  - "Expected in production: Windows Update, antivirus and EDR agents, monitoring agents and chat or email clients all check in on timers. These would be handled with an allowlist of known destinations and signed programs."
+
+tuning:
+  before: 2 hits
+  after: 1 hit
+  what_changed: >
+    Before tuning, the search returned the Empire beacon and ADWS. The legit
+    service was more regular than the malware (jitter 0.19 vs 1.69), because
+    Windows services run on exact timers while attackers add random delay on
+    purpose. So regularity alone cannot separate them. What did separate them
+    was the destination: ADWS was talking to itself on loopback, and loopback
+    traffic never leaves the machine, so it cannot be C2. I excluded all common
+    loopback spellings. I did not exclude port 389, because attackers can use
+    any port. Raising the connection count would not have worked either: over
+    a full day ADWS would make about 1,440 connections.
+
+test_results:
+  dataset: OTRF Security-Datasets empire_mimikatz_logonpasswords
+  expected_hits: 1
+  actual_hits: 1
+  notes: >
+    The hit is powershell.exe on WORKSTATION5 connecting to 10.10.10.5 on port
+    80 (HTTP) 35 times, with an average gap of 5.2 seconds and jitter of 1.69
+    seconds. That matches Empire's default check-in with added jitter. _time
+    in this data is the collector's @timestamp, not the event's own UtcTime,
+    which shifts jitter slightly (1.69 using _time vs about 1.55 using
+    UtcTime).
+
+limitations:
+  - "The test data covers only 3 minutes. A slow beacon (every hour, or every day) would not reach 3 connections in a short window and needs a longer search window."
+  - "Heavy jitter defeats the jitter < avg_gap/2 rule. Malware configured with a very random interval would not look steady."
+  - "10.10.10.5 is an internal lab address. Real C2 is usually external, and a real deployment would add threat intel, domain age or destination reputation."
+  - "Malware that uses a legitimate cloud service (for example a file sharing or chat API) as C2 would blend in with allowlisted traffic."
+
+references:
+  - https://attack.mitre.org/techniques/T1071/001/
+  - https://github.com/OTRF/Security-Datasets/tree/master/datasets/atomic/windows/credential_access/host

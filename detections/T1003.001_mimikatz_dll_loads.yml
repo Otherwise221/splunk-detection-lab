@@ -1,0 +1,77 @@
+name: Mimikatz Credential DLLs Loaded by One Process
+id: DL-003
+date: 2026-09-27
+author: Lateefat Alimi
+status: tested
+description: >
+  Detects a single process loading several Windows DLLs that Mimikatz needs to
+  read credentials, such as samlib, vaultcli, cryptdll and winscard. Each DLL
+  is normal on its own. Loading many of them at once is how Mimikatz looks when
+  it starts up.
+
+mitre_attack:
+  tactic: TA0006 Credential Access
+  technique_id: T1003.001
+  technique_name: "OS Credential Dumping: LSASS Memory"
+  software: S0002 Mimikatz
+
+data_source:
+  log: Microsoft-Windows-Sysmon/Operational
+  event_id: 7 (ImageLoaded)
+  fields_used: ImageLoaded, Image, ProcessId, Hostname
+
+search: |
+  index=otrf Channel="Microsoft-Windows-Sysmon/Operational" EventID=7
+  | eval dll=lower(mvindex(split(ImageLoaded,"\\"),-1))
+  | search dll IN ("samlib.dll","vaultcli.dll","cryptdll.dll","winscard.dll","hid.dll","netapi32.dll","wkscli.dll","netutils.dll","logoncli.dll","wldap32.dll","dpapi.dll")
+  | stats dc(dll) as dll_count values(dll) as dlls min(_time) as first max(_time) as last by Hostname Image ProcessId
+  | eval span_ms=round((last-first)*1000)
+  | where dll_count>=4
+  | table Hostname Image ProcessId dll_count span_ms dlls
+
+how_it_works: >
+  Sysmon event 7 logs every DLL a program loads. The eval line cuts the full
+  path down to just the file name so it can be compared to a watch list of 11
+  DLLs that Mimikatz uses for its password, vault, smart card and Kerberos
+  modules. stats then groups the loads by running process and counts how many
+  different listed DLLs each one loaded. Every DLL on the list is a normal,
+  Microsoft-signed Windows file, so signature checks do not help. The signal is
+  the combination: one process loading many of them close together.
+
+false_positives:
+  - "Seen in testing: svchost.exe on MORDORDC loaded dpapi.dll (1 listed DLL). Windows uses DPAPI constantly to protect saved secrets."
+  - "Seen in testing: whoami.exe on WORKSTATION5 loaded netutils.dll and wkscli.dll (2 listed DLLs). whoami was run by the attacker, but these loads are what whoami always needs, not credential theft. It belongs to a separate discovery detection (T1033)."
+  - "Expected in production: password managers, VPN or smart card software, and backup tools may load several of these DLLs. These would need an allowlist by full Image path after review."
+
+tuning:
+  before: 21 events across 3 processes
+  after: 1 hit
+  what_changed: >
+    The first version showed every load of a listed DLL: 21 events from
+    svchost, whoami and powershell. Grouping by process and counting distinct
+    DLLs showed svchost at 1, whoami at 2 and powershell at 10. I set the
+    threshold at 4. Normal processes topped out at 2, so 4 gives margin above
+    normal activity, while staying well below 10 so a trimmed-down Mimikatz
+    build that loads fewer modules would still be caught.
+
+test_results:
+  dataset: OTRF Security-Datasets empire_mimikatz_logonpasswords
+  expected_hits: 1
+  actual_hits: 1
+  notes: >
+    The hit is powershell.exe (PID 1648) on WORKSTATION5, which loaded 10 of
+    the 11 listed DLLs within 7 milliseconds at 2020-08-07 14:32:57 UTC. The
+    LSASS access caught by DL-001 happened 1 millisecond later, from the same
+    process. This detection and DL-001 catch the same attack from two
+    different log sources.
+
+limitations:
+  - "Blind if Sysmon is not logging event 7. Image load logging is high volume and often filtered or turned off."
+  - "Depends on the DLL watch list. A custom or rewritten credential tool that uses different DLLs would not match."
+  - "Grouping by ProcessId means a tool that loads its DLLs in separate short-lived processes could stay under the threshold."
+  - "Tested only against one dataset. The threshold of 4 has not been checked against a real environment's normal software."
+
+references:
+  - https://attack.mitre.org/techniques/T1003/001/
+  - https://attack.mitre.org/software/S0002/
+  - https://github.com/OTRF/Security-Datasets/tree/master/datasets/atomic/windows/credential_access/host
