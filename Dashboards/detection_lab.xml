@@ -1,0 +1,144 @@
+<dashboard version="1.1" theme="light">
+  <label>Splunk Detection Lab</label>
+  <description>Four ATT&amp;CK-mapped detections run against the OTRF empire_mimikatz_logonpasswords dataset (index=otrf).</description>
+  <row>
+    <panel>
+      <single>
+        <title>DL-001 LSASS memory access</title>
+        <search>
+          <query><![CDATA[index=otrf EventID=10 TargetImage="*\\lsass.exe"
+| eval access=tonumber(replace(GrantedAccess,"0x",""),16)
+| where floor(access/16)%2=1 OR like(CallTrace,"%UNKNOWN%")
+| stats count]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="underLabel">hits (T1003.001)</option>
+      </single>
+    </panel>
+    <panel>
+      <single>
+        <title>DL-002 Encoded PowerShell</title>
+        <search>
+          <query><![CDATA[index=otrf Channel="Windows PowerShell" EventID=400
+| rex field=Message "HostApplication=(?<HostApplication>[^\r\n]+)"
+| where match(HostApplication, "(?i)\s[-/]e[a-z]*\s+[A-Za-z0-9+/=]{20,}")
+| stats count]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="underLabel">hits (T1059.001)</option>
+      </single>
+    </panel>
+    <panel>
+      <single>
+        <title>DL-003 Mimikatz DLL loads</title>
+        <search>
+          <query><![CDATA[index=otrf Channel="Microsoft-Windows-Sysmon/Operational" EventID=7
+| eval dll=lower(mvindex(split(ImageLoaded,"\\"),-1))
+| search dll IN ("samlib.dll","vaultcli.dll","cryptdll.dll","winscard.dll","hid.dll","netapi32.dll","wkscli.dll","netutils.dll","logoncli.dll","wldap32.dll","dpapi.dll")
+| stats dc(dll) as dll_count by Hostname Image ProcessId
+| where dll_count>=4
+| stats count]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="underLabel">hits (T1003.001)</option>
+      </single>
+    </panel>
+    <panel>
+      <single>
+        <title>DL-004 C2 beaconing</title>
+        <search>
+          <query><![CDATA[index=otrf Channel="Microsoft-Windows-Sysmon/Operational" EventID=3 Initiated=true NOT DestinationIp IN ("0:0:0:0:0:0:0:1","::1","127.0.0.1")
+| sort 0 _time
+| streamstats current=f last(_time) as prev_time by Hostname Image DestinationIp DestinationPort
+| eval gap=_time-prev_time
+| stats count as connections avg(gap) as avg_gap stdev(gap) as jitter by Hostname Image DestinationIp DestinationPort
+| where connections>=3 AND jitter < avg_gap/2
+| stats count]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="underLabel">hits (T1071.001)</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>DL-001 LSASS memory access</title>
+      <table>
+        <search>
+          <query><![CDATA[index=otrf EventID=10 TargetImage="*\\lsass.exe"
+| eval access=tonumber(replace(GrantedAccess,"0x",""),16)
+| where floor(access/16)%2=1 OR like(CallTrace,"%UNKNOWN%")
+| table _time Hostname SourceImage GrantedAccess CallTrace]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+      </table>
+    </panel>
+    <panel>
+      <title>DL-002 Encoded PowerShell</title>
+      <table>
+        <search>
+          <query><![CDATA[index=otrf Channel="Windows PowerShell" EventID=400
+| rex field=Message "HostApplication=(?<HostApplication>[^\r\n]+)"
+| where match(HostApplication, "(?i)\s[-/]e[a-z]*\s+[A-Za-z0-9+/=]{20,}")
+| eval HostApplication=substr(HostApplication,1,120)."..."
+| table _time Hostname HostApplication]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>DL-003 Mimikatz DLL loads</title>
+      <table>
+        <search>
+          <query><![CDATA[index=otrf Channel="Microsoft-Windows-Sysmon/Operational" EventID=7
+| eval dll=lower(mvindex(split(ImageLoaded,"\\"),-1))
+| search dll IN ("samlib.dll","vaultcli.dll","cryptdll.dll","winscard.dll","hid.dll","netapi32.dll","wkscli.dll","netutils.dll","logoncli.dll","wldap32.dll","dpapi.dll")
+| stats dc(dll) as dll_count values(dll) as dlls min(_time) as first max(_time) as last by Hostname Image ProcessId
+| eval span_ms=round((last-first)*1000)
+| where dll_count>=4
+| table Hostname Image ProcessId dll_count span_ms dlls]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+      </table>
+    </panel>
+    <panel>
+      <title>DL-004 C2 beaconing</title>
+      <table>
+        <search>
+          <query><![CDATA[index=otrf Channel="Microsoft-Windows-Sysmon/Operational" EventID=3 Initiated=true NOT DestinationIp IN ("0:0:0:0:0:0:0:1","::1","127.0.0.1")
+| sort 0 _time
+| streamstats current=f last(_time) as prev_time by Hostname Image DestinationIp DestinationPort
+| eval gap=_time-prev_time
+| stats count as connections avg(gap) as avg_gap stdev(gap) as jitter by Hostname Image DestinationIp DestinationPort
+| eval avg_gap=round(avg_gap,1), jitter=round(jitter,2)
+| where connections>=3 AND jitter < avg_gap/2]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Events by log source (data check)</title>
+      <chart>
+        <search>
+          <query><![CDATA[index=otrf | stats count by Channel | sort -count]]></query>
+          <earliest>0</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.legend.placement">none</option>
+      </chart>
+    </panel>
+  </row>
+</dashboard>
